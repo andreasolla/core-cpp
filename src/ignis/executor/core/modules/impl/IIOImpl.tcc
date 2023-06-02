@@ -7,6 +7,7 @@
 #include "ignis/executor/core/transport/IZlibTransport.h"
 #include <climits>
 #include <fstream>
+#include "libhdfsExplorer.h"
 
 #define IIOImplClass ignis::executor::core::modules::impl::IIOImpl
 

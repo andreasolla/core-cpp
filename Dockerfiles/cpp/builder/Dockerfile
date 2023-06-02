@@ -69,6 +69,30 @@ RUN cd ${IGNIS_HOME} && \
 COPY ${RELPATH}ignis-cpp-install.sh ${IGNIS_HOME}/bin
 RUN chmod +x ${IGNIS_HOME}/bin/ignis-cpp-install.sh
 
+ADD https://dlcdn.apache.org/hadoop/common/hadoop-3.3.1/hadoop-3.3.1.tar.gz hadoop-3.3.1.tar.gz
+RUN tar -xzvf hadoop-3.3.1.tar.gz && \
+    cp -R hadoop-3.3.1 ${IGNIS_HOME}/core/cpp/hdfs/ && \
+	rm -fR hadoop-3.3.1.tar.gz
+
+COPY ${RELPATH}hdfsExplorer/go.mod /tmp/go/
+COPY ${RELPATH}hdfsExplorer/go.sum /tmp/go/
+COPY ${RELPATH}hdfsExplorer/hdfsExplorer.go /tmp/go/
+
+ENV GO_VERSION=go1.20.4
+RUN cd ${IGNIS_HOME} && \
+	mkdir -p opt/go && \
+	cd opt/go && \
+	(wget https://go.dev/dl/${GO_VERSION}.linux-$(dpkg --print-architecture).tar.gz -O golang.tar.gz || \ 
+	wget https://go.dev/dl/${GO_VERSION}.linux-$(uname -m).tar.gz -O golang.tar.gz) && \
+	tar -xvzf  golang.tar.gz && \
+	rm -fR golang.tar.gz
+ENV PATH=$PATH:/${IGNIS_HOME}/opt/go/go/bin
+ENV LD_LIBRARY_PATH=${IGNIS_HOME}/core/cpp/
+RUN cd /tmp/go/ &&\
+    go build -o libhdfsExplorer.so -buildmode=c-shared hdfsExplorer.go && \
+    cp libhdfsExplorer.so ${IGNIS_HOME}/core/cpp/lib/ && \
+    cp libhdfsExplorer.h ${IGNIS_HOME}/core/cpp/include/
+
 COPY / /tmp/core-cpp
 RUN cd /tmp/core-cpp && \
 	export CC=${IGNIS_DEVEL}/mpi/bin/mpicc && \

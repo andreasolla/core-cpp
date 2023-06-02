@@ -46,6 +46,12 @@ namespace ignis {
 
                 std::string executorDirectory() { return getString("ignis.executor.directory"); }
 
+                std::string hdfsPath() { return getString("ignis.hdfs.namenode"); }
+
+                std::string host() { return getString("ignis.executor.host"); }
+
+                bool hdfsPreserveOrder() { return getBoolean("ignis.hdfs.preserve.order"); }
+
                 //Auxiliary functions
 
                 std::string &getString(const std::string &key);

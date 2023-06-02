@@ -211,7 +211,7 @@ add_library(igniscore SHARED ${SOURCE_FILES})
 add_library(igniscore_types SHARED ${autogen})
 add_executable(ignis-cpp main.cpp)
 
-TARGET_LINK_LIBRARIES(igniscore thrift dl backtrace thriftz z)
+TARGET_LINK_LIBRARIES(igniscore thrift dl backtrace thriftz z hdfsExplorer)
 TARGET_LINK_LIBRARIES(igniscore_types igniscore)
 TARGET_LINK_LIBRARIES(ignis-cpp igniscore igniscore_types)
 

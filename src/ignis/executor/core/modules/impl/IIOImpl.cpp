@@ -8,6 +8,7 @@
 #include <rapidjson/error/en.h>
 #include <rapidjson/istreamwrapper.h>
 #include <rapidjson/reader.h>
+#include <map>
 
 using namespace ignis::executor::core::modules::impl;
 using namespace ignis::executor::core::storage;
@@ -16,6 +17,18 @@ using ignis::executor::api::IJsonValue;
 IIOImpl::IIOImpl(std::shared_ptr<IExecutorData> &executorData) : IBaseImpl(executorData) {}
 
 IIOImpl::~IIOImpl() {}
+
+class Block {
+public:
+    int BlockID;
+    int NumBytes;
+    std::string IpAddr;
+
+    Block() : BlockID(0), NumBytes(0), IpAddr("") {}
+
+    Block(int blockID, int numBytes, const std::string& ipAddr)
+        : BlockID(blockID), NumBytes(numBytes), IpAddr(ipAddr) {}
+};
 
 std::string IIOImpl::partitionFileName(const std::string &path, int64_t index) {
     if (!ghc::filesystem::is_directory(path)) {
@@ -217,7 +230,399 @@ void IIOImpl::plainFile(const std::string &path, int64_t minPartitions, const st
     IGNIS_CATCH()
 }
 
-void IIOImpl::textFile(const std::string &path, int64_t minPartitions) { return plainFile(path, minPartitions, "\n"); }
+std::vector<Block> GetBlocks(int file) {
+    int size;
+    BlockInfo* Cblocks = GetBlockInfo(file, &size);
+
+    std::vector<Block> blocks;
+    for (int i = 0; i < size; i++) {
+        Block block(Cblocks[i].blockid, Cblocks[i].numbytes, Cblocks[i].ipaddr);
+        blocks.push_back(block);
+    }
+
+    FreeBlockInfo(Cblocks, size);
+
+    return blocks;
+}
+
+std::vector<int> assignedBlocks(const std::vector<Block> &blocks, std::shared_ptr<ignis::executor::core::IExecutorData> executor_data) {
+    IGNIS_LOG(info) << "IO: distributing blocks";
+    int executorId = executor_data->getContext().executorId();
+    std::string executorIP = executor_data->getProperties().host();
+    int executors = executor_data->getContext().executors();
+    int blocksPerExecutor = ceil(blocks.size() / executors);
+
+    std::vector<Block> executorBlocks;
+    std::map<int, Block> notAssignedBlocks;
+    for (int i = 0; i < blocks.size(); i++) {
+        notAssignedBlocks[blocks[i].BlockID] = blocks[i];
+        if (blocks[i].IpAddr == executorIP) {
+            executorBlocks.push_back(blocks[i]);
+        }
+    }
+    
+    // Comunicacion con los demas ejecutores para repartir los bloques
+    std::vector<std::pair<const int, std::vector<Block>>> myBlocks;
+    myBlocks.push_back(std::make_pair(executorId, executorBlocks));
+
+    //------------------------------
+    // Obtengo el orden de los ejecutores
+    int executorsOrder[executors];
+    MPI_Allgather(&executorId, 1, MPI::INT, executorsOrder, 1, MPI::INT, executor_data->getContext().mpiGroup());
+    
+    //Obtengo el numero de bloques de cada ejecutor
+    int executorsNBlocks[executors];
+    int numBlocks = executorBlocks.size();
+    MPI_Allgather(&numBlocks, 1, MPI::INT, executorsNBlocks, 1, MPI::INT, executor_data->getContext().mpiGroup());
+    
+    // Paso los BlockID de executorBlocks a un array de bloques
+    int executorBlocksArray[executorBlocks.size()];
+    for (int i = 0; i < executorBlocks.size(); i++) {
+        executorBlocksArray[i] = executorBlocks[i].BlockID;
+    }
+    
+    // Array de posiciones donde se guardaran los bloques de cada ejecutor
+    int executorsBlocksPos[executors];
+    executorsBlocksPos[0] = 0;
+    for (int i = 1; i < executors; i++) {
+        executorsBlocksPos[i] = executorsBlocksPos[i-1] + executorsNBlocks[i-1];
+    }
+    
+    //Obtengo el numero total de bloques
+    int totalBlocks = 0;
+    for (int i = 0; i < executors; i++) {
+        totalBlocks += executorsNBlocks[i];
+    }
+    // Obtengo todos los bloques de todos los ejecutores con allgatherv
+    int allBlocksArray[totalBlocks];
+    MPI_Allgatherv(executorBlocksArray, executorBlocks.size(), MPI::INT, allBlocksArray, executorsNBlocks, executorsBlocksPos, MPI::INT, executor_data->getContext().mpiGroup());
+    
+    std::vector<std::pair<int, std::vector<int>>> allBlocks;
+
+    for (int i = 0; i < executors; i++) {
+        std::vector<int> blocks;
+        for (int j = 0; j < executorsNBlocks[i]; j++) {
+            blocks.push_back(allBlocksArray[executorsBlocksPos[i] + j]);
+        }
+        std::pair<int, std::vector<int>> pair = std::make_pair(executorsOrder[i], blocks);
+        allBlocks.push_back(pair);
+    }
+    
+    std::sort(allBlocks.begin(), allBlocks.end(), [](const std::pair<int, std::vector<int>>& a, const std::pair<int, std::vector<int>>& b) {
+        return a.first < b.first; // Ordenar por el primer elemento del par
+    });
+    
+    // Reparto de bloques por IP
+    std::vector<int> takenBlocks;
+    std::vector<int> assignedBlocks;
+    std::vector<int> numberBlocks(executors, 0);
+    for (int i = 0; i < executors; i++) {
+        int taken = 0;
+        int pos = 0;
+        int nBlocks = 0;
+        while (allBlocks[i].second.size() > 0 && taken < blocksPerExecutor && pos < allBlocks[i].second.size()) {
+            // si no esta en takenBlocks, se asigna
+            if (std::find(takenBlocks.begin(), takenBlocks.end(), allBlocks[i].second[pos]) != takenBlocks.end()) {
+                takenBlocks.push_back(allBlocks[i].second[pos]);
+                taken += 1;
+                nBlocks += 1;
+                if (allBlocks[i].first == executorId) {
+                    assignedBlocks.push_back(allBlocks[i].second[pos]);
+                }
+            }
+            pos += 1;
+        }
+        numberBlocks[i] = nBlocks;
+    }
+    
+    // Bloques que no han sido asignados
+    std::vector<int> lostBlocks;
+    for (int i = 0; i < blocks.size(); i++) {
+        if (std::find(takenBlocks.begin(), takenBlocks.end(), blocks[i].BlockID) == takenBlocks.end()) { lostBlocks.push_back(blocks[i].BlockID); }
+    }
+
+    // Si aun no se han asignado todos los bloques, se asignan los que faltan
+    if (assignedBlocks.size() < blocksPerExecutor && lostBlocks.size() > 0) {
+        int n_executor = 0;
+        int i = 0;
+        
+        while (n_executor < executorId && lostBlocks.size() > i) {
+            i += blocksPerExecutor - numberBlocks[n_executor];
+            n_executor += 1;
+        }
+        while (assignedBlocks.size() < blocksPerExecutor && lostBlocks.size() > i) {
+            assignedBlocks.push_back(lostBlocks[i]);
+            i += 1;
+        }
+    }
+
+    return assignedBlocks;
+}
+
+void hdfsNotOrdering(const std::string &path, int64_t minPartitions,
+                     std::shared_ptr<ignis::executor::core::IExecutorData> executor_data, int io_cores) {
+    std::string aux = "/" + path.substr(path.find('/') + 2);
+    int length = aux.length();
+    char *fpath = new char[length + 1];
+    strcpy(fpath, aux.c_str());
+
+    std::string hdfsHost = executor_data->getProperties().hdfsPath();
+    int length2 = hdfsHost.length();
+    char *chdfsHost = new char[length2 + 1];
+    strcpy(chdfsHost, hdfsHost.c_str());
+    if (NewHdfsClient(chdfsHost) < 0) {
+        IGNIS_LOG(error) << "IO: hdfs client not connected";
+        return;
+    }
+    IGNIS_LOG(info) << "IO: hdfs client connected";
+    delete[] chdfsHost;
+
+    auto size = Size(fpath);
+    IGNIS_LOG(info) << "IO: file has " << size << " Bytes";
+    auto result = executor_data->getPartitionTools().newPartitionGroup<std::string>();
+    decltype(result) thread_groups[io_cores];
+    size_t total_bytes = 0;
+    size_t elements = 0;
+    std::string host = executor_data->getProperties().host();
+
+    int file = Open(fpath, 'r');
+    const std::vector<Block> blocks = GetBlocks(file);
+    auto blocksToRead = assignedBlocks(blocks, executor_data);
+    //Obtencion de los bloques a leer
+    int first = blocks[0].BlockID;
+    int blockSize = blocks[0].NumBytes;
+    std::vector<Block> myBlocks;
+
+    for (int i = 0; i < blocks.size(); i++) {
+        if (std::find(blocksToRead.begin(), blocksToRead.end(), blocks[i].BlockID) != blocksToRead.end()) {
+            myBlocks.push_back(blocks[i]);
+        }
+    }
+
+    Close(file, 'r');
+    
+    IGNIS_OMP_EXCEPTION_INIT()
+#pragma omp parallel reduction(+ : total_bytes, elements) firstprivate(minPartitions, myBlocks, blockSize) num_threads(io_cores)
+    {
+        IGNIS_OMP_TRY()
+        auto file = Open(fpath, 'r');
+        auto id = executor_data->getContext().threadId();
+        auto globalThreadId = executor_data->getContext().executorId() * io_cores + id;
+        auto threads = executor_data->getContext().executors() * io_cores;
+        size_t minPartitionSize = blockSize;
+        std::string str;
+        std::string ldelim = "\n";
+        int esize = 0;
+
+        for (int i=0; i < myBlocks.size(); i++) {
+            size_t ex_chunk_init = (myBlocks[i].BlockID - first) * blockSize;
+            size_t ex_chunk_end = ex_chunk_init + myBlocks[i].NumBytes;
+            size_t filepos = ex_chunk_init;
+
+            thread_groups[id] = executor_data->getPartitionTools().newPartitionGroup<std::string>();
+            auto partition = executor_data->getPartitionTools().newPartition<std::string>();
+            auto write_iterator = partition->writeIterator();
+            thread_groups[id]->add(partition);
+            size_t partitionInit = ex_chunk_init;
+
+            if (myBlocks[i].BlockID != first) {
+                size_t padding = ex_chunk_init >= (ldelim.size()) ? ex_chunk_init - (ldelim.size()) : 0;
+                Seek(file, padding, 0);
+                while (ex_chunk_init > padding) { padding += std::string((ReadLine(file))).size(); }
+
+                ex_chunk_init = padding;
+                if (globalThreadId == threads - 1) { ex_chunk_end = size; }
+            }
+
+            if (executor_data->getPartitionTools().isMemory(*partition)) {
+                auto part_men = executor_data->getPartitionTools().toMemory(partition);
+                while (filepos < ex_chunk_end) {
+                    if ((filepos - partitionInit) > minPartitionSize) {
+                        part_men->fit();
+                        part_men = executor_data->getPartitionTools().newMemoryPartition<std::string>();
+                        thread_groups[id]->add(part_men);
+                        partitionInit = filepos;
+                    }
+                    
+                    str = ReadLine(file);
+                    filepos += str.size();
+                    elements++;
+                    str.resize(str.size() - ldelim.size());
+                    part_men->inner().push_back(str);
+                }
+            } else {
+                while (filepos < ex_chunk_end) {
+                    if ((filepos - partitionInit) > minPartitionSize) {
+                        partition->fit();
+                        partition = executor_data->getPartitionTools().newPartition<std::string>();
+                        write_iterator = partition->writeIterator();
+                        thread_groups[id]->add(partition);
+                        partitionInit = filepos;
+                    }
+                    
+                    str = ReadLine(file);
+                    filepos += str.size();
+                    elements++;
+                    str.resize(str.size() - ldelim.size());
+                    write_iterator->write(str);
+                }
+            }
+            total_bytes += (size_t) filepos - ex_chunk_init;
+        }
+
+        Close(file, 'r');
+        
+        IGNIS_OMP_CATCH()
+    }
+    IGNIS_OMP_EXCEPTION_END()
+
+    delete[] fpath;
+
+    for (auto group : thread_groups) {
+        for (auto part : *group) { result->add(part); }
+    }
+
+    IGNIS_LOG(info) << "IO: created  " << result->partitions() << " partitions, " << elements << " lines and "
+                    << total_bytes << " Bytes read ";
+
+    executor_data->setPartitions(result);
+    
+    CloseConnection();
+}
+
+void hdfsTextFile(const std::string &path, int64_t minPartitions,
+                  std::shared_ptr<ignis::executor::core::IExecutorData> executor_data, int io_cores) {
+    IGNIS_TRY()
+    IGNIS_LOG(info) << "IO: reading hdfs file";
+
+    if (!executor_data->getProperties().hdfsPreserveOrder()) {
+        return hdfsNotOrdering(path, minPartitions, executor_data, io_cores);
+    }
+
+    std::string aux = "/" + path.substr(path.find('/') + 2);
+
+    int length = aux.length();
+    char *fpath = new char[length + 1];
+    strcpy(fpath, aux.c_str());
+
+    std::string hdfsHost = executor_data->getProperties().hdfsPath();
+    int length2 = hdfsHost.length();
+    char *chdfsHost = new char[length2 + 1];
+    strcpy(chdfsHost, hdfsHost.c_str());
+    if (NewHdfsClient(chdfsHost) < 0) {
+        IGNIS_LOG(error) << "IO: hdfs client not connected";
+        return;
+    }
+    IGNIS_LOG(info) << "IO: hdfs client connected";
+    delete[] chdfsHost;
+
+    auto size = Size(fpath);
+    IGNIS_LOG(info) << "IO: file has " << size << " Bytes";
+    auto result = executor_data->getPartitionTools().newPartitionGroup<std::string>();
+    decltype(result) thread_groups[io_cores];
+    size_t total_bytes = 0;
+    size_t elements = 0;
+
+    std::string host = executor_data->getProperties().host();
+
+    IGNIS_OMP_EXCEPTION_INIT()
+#pragma omp parallel reduction(+ : total_bytes, elements) firstprivate(minPartitions) num_threads(io_cores)
+    {
+        IGNIS_OMP_TRY()
+        //std::ifstream file = openFileRead(path);
+        auto file = Open(fpath, 'r');
+        auto id = executor_data->getContext().threadId();
+        auto globalThreadId = executor_data->getContext().executorId() * io_cores + id;
+        auto threads = executor_data->getContext().executors() * io_cores;
+        size_t ex_chunk = size / threads;
+        size_t ex_chunk_init = globalThreadId * ex_chunk;
+        size_t ex_chunk_end = ex_chunk_init + ex_chunk;
+        size_t minPartitionSize = executor_data->getProperties().partitionMinimal();
+        minPartitions = (int64_t) std::ceil(minPartitions / (float) threads);
+        std::string str;
+        std::vector<std::string> exs;
+        std::string ldelim = "\n";
+        int esize = 0;
+
+        if (globalThreadId > 0) {
+            size_t padding = ex_chunk_init >= (ldelim.size()) ? ex_chunk_init - (ldelim.size()) : 0;
+            Seek(file, padding, 0);
+            while (ex_chunk_init > padding) { padding += std::string((ReadLine(file))).size(); }
+            
+            ex_chunk_init = padding;
+            if (globalThreadId == threads - 1) { ex_chunk_end = size; }
+        }
+
+        if (ex_chunk / minPartitionSize < minPartitions) { minPartitionSize = ex_chunk / minPartitions; }
+
+        thread_groups[id] = executor_data->getPartitionTools().newPartitionGroup<std::string>();
+        auto partition = executor_data->getPartitionTools().newPartition<std::string>();
+        auto write_iterator = partition->writeIterator();
+        thread_groups[id]->add(partition);
+        size_t partitionInit = ex_chunk_init;
+        size_t filepos = ex_chunk_init;
+
+        if (executor_data->getPartitionTools().isMemory(*partition)) {
+            auto part_men = executor_data->getPartitionTools().toMemory(partition);
+            while (filepos < ex_chunk_end) {
+                if ((filepos - partitionInit) > minPartitionSize) {
+                    part_men->fit();
+                    part_men = executor_data->getPartitionTools().newMemoryPartition<std::string>();
+                    thread_groups[id]->add(part_men);
+                    partitionInit = filepos;
+                }
+
+                str = ReadLine(file);
+                filepos += str.size();
+                elements++;
+                str.resize(str.size() - ldelim.size());
+                part_men->inner().push_back(str);
+            }
+        } else {
+            while (filepos < ex_chunk_end) {
+                if ((filepos - partitionInit) > minPartitionSize) {
+                    partition->fit();
+                    partition = executor_data->getPartitionTools().newPartition<std::string>();
+                    write_iterator = partition->writeIterator();
+                    thread_groups[id]->add(partition);
+                    partitionInit = filepos;
+                }
+                
+                str = ReadLine(file);
+                filepos += str.size();
+                elements++;
+                str.resize(str.size() - ldelim.size());
+                write_iterator->write(str);
+            }
+        }
+
+        total_bytes += (size_t) filepos - ex_chunk_init;
+
+        Close(file, 'r');
+        
+        IGNIS_OMP_CATCH()
+    }
+    IGNIS_OMP_EXCEPTION_END()
+
+    delete[] fpath;
+
+    for (auto group : thread_groups) {
+        for (auto part : *group) { result->add(part); }
+    }
+
+    IGNIS_LOG(info) << "IO: created  " << result->partitions() << " partitions, " << elements << " lines and "
+                    << total_bytes << " Bytes read ";
+
+    executor_data->setPartitions(result);
+
+    CloseConnection();
+    IGNIS_CATCH()
+}
+
+void IIOImpl::textFile(const std::string &path, int64_t minPartitions) {
+        if (path.find("hdfs://") == 0) { return hdfsTextFile(path, minPartitions, executor_data, ioCores()); }
+        return plainFile(path, minPartitions, "\n");
+}
 
 void IIOImpl::partitionTextFile(const std::string &path, int64_t first, int64_t partitions) {
     IGNIS_TRY()
