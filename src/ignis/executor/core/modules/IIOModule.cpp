@@ -135,7 +135,11 @@ void IIOModule::saveAsObjectFile(const std::string &path, const int8_t compressi
 
 void IIOModule::saveAsTextFile(const std::string &path, const int64_t first) {
     IGNIS_RPC_TRY()
-    typeFromPartition()->saveAsTextFile(impl, path, first);
+    if (path.find("hdfs://") == 0) {
+        typeFromPartition()->saveAsHdfsFile(impl, path, first);
+    } else {
+        typeFromPartition()->saveAsTextFile(impl, path, first);
+    }
     IGNIS_RPC_CATCH()
 }
 

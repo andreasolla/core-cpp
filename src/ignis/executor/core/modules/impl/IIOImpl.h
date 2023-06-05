@@ -40,6 +40,9 @@ namespace ignis {
                         void saveAsTextFile(const std::string &path, int64_t first);
 
                         template<typename Tp>
+                        void saveAsHdfsFile(const std::string &path, int64_t first);
+
+                        template<typename Tp>
                         void saveAsJsonFile(const std::string &path, int64_t first, bool pretty);
 
                         std::string partitionFileName(const std::string &path, int64_t index);

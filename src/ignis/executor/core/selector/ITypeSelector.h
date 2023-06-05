@@ -91,6 +91,9 @@ namespace ignis {
 
                     virtual void saveAsTextFile(modules::impl::IIOImpl &impl, const std::string &path,
                                                 int64_t first) = 0;
+                    
+                    virtual void saveAsHdfsFile(modules::impl::IIOImpl &impl, const std::string &path,
+                                                int64_t first) = 0;
 
                     virtual void saveAsJsonFile(modules::impl::IIOImpl &impl, const std::string &path, int64_t first,
                                                 bool pretty) = 0;
@@ -232,6 +235,10 @@ namespace ignis {
 
                     virtual void saveAsTextFile(modules::impl::IIOImpl &impl, const std::string &path, int64_t first) {
                         impl.saveAsTextFile<Tp>(path, first);
+                    }
+
+                    virtual void saveAsHdfsFile(modules::impl::IIOImpl &impl, const std::string &path, int64_t first) {
+                        impl.saveAsHdfsFile<Tp>(path, first);
                     }
 
                     virtual void saveAsJsonFile(modules::impl::IIOImpl &impl, const std::string &path, int64_t first,
