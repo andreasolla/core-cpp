@@ -25,7 +25,6 @@ public:
     HDFStreamBuffer()
     {
         file = nullptr;
-        hdfs = nullptr;
     }
 
     ~HDFStreamBuffer()

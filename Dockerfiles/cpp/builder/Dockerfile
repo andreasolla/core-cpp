@@ -43,7 +43,7 @@ RUN cd /tmp && \
 	git clone https://github.com/gabime/spdlog --branch v${SPDLOG_VERSION} --single-branch spdlog && \
 	cd spdlog && \
 	cmake -DSPDLOG_BUILD_EXAMPLE=FALSE . && \
-	make -j && \
+	make -j4 && \
 	make install && \
 	cd .. && \
 	rm -fR spdlog
@@ -100,7 +100,7 @@ RUN cd /tmp/core-cpp && \
 	export LIBRARY_PATH=${IGNIS_HOME}/core/cpp/lib && \
 	export CPATH=${IGNIS_HOME}/core/cpp/include && \
 	cmake -DBUILD_TESTING=OFF -DCMAKE_INSTALL_PREFIX=${IGNIS_HOME}/core/cpp/ . && \
-	make -j && \
+	make -j4 && \
 	make install && \
 	rm -fr /tmp/core-cpp && \
 	cd ${IGNIS_HOME} && \
