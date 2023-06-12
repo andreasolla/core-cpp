@@ -7,6 +7,7 @@
 #include "ignis/executor/core/IMpi.h"
 #include "ignis/executor/core/exception/IInvalidArgument.h"
 #include "ignis/executor/core/exception/ILogicError.h"
+#include "ignis/executor/core/exception/IException.h"
 #include "ignis/executor/core/storage/IDiskPartition.h"
 #include "ignis/executor/core/storage/IMemoryPartition.h"
 #include "ignis/executor/core/storage/IRawMemoryPartition.h"

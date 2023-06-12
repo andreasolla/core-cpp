@@ -2,6 +2,7 @@
 #include "IIOImpl.h"
 #include "ignis/executor/api/IJsonValue.h"
 #include "ignis/executor/core/storage/IVoidPartition.h"
+#include "ignis/executor/core/exception/IException.h"
 #include <algorithm>
 #include <fstream>
 #include <ghc/filesystem.hpp>
@@ -9,6 +10,7 @@
 #include <rapidjson/istreamwrapper.h>
 #include <rapidjson/reader.h>
 #include <map>
+#include <chrono>
 
 using namespace ignis::executor::core::modules::impl;
 using namespace ignis::executor::core::storage;
@@ -114,7 +116,7 @@ void IIOImpl::plainFile(const std::string &path, int64_t minPartitions, const st
     size_t elements = 0;
 
     IGNIS_OMP_EXCEPTION_INIT()
-#pragma omp parallel reduction(+ : total_bytes, elements) firstprivate(minPartitions) num_threads(io_cores)
+#pragma omp parallel reduction(+ : total_bytes, elements) firstprivate(minPartitions) private(start, end, diff) num_threads(io_cores)
     {
         IGNIS_OMP_TRY()
         std::ifstream file = openFileRead(path);
@@ -157,7 +159,6 @@ void IIOImpl::plainFile(const std::string &path, int64_t minPartitions, const st
         }
         if (ldelim.empty()) { ldelim = "\n"; }
         int dsize = ldelim.size();
-
         if (globalThreadId > 0) {
             size_t padding = ex_chunk_init >= (dsize + esize) ? ex_chunk_init - (dsize + esize) : 0;
             file.seekg(padding);
@@ -182,7 +183,7 @@ void IIOImpl::plainFile(const std::string &path, int64_t minPartitions, const st
         thread_groups[id]->add(partition);
         size_t partitionInit = ex_chunk_init;
         size_t filepos = ex_chunk_init;
-
+        
         if (executor_data->getPartitionTools().isMemory(*partition)) {
             auto part_men = executor_data->getPartitionTools().toMemory(partition);
             while (filepos < ex_chunk_end) {
@@ -218,7 +219,7 @@ void IIOImpl::plainFile(const std::string &path, int64_t minPartitions, const st
         IGNIS_OMP_CATCH()
     }
     IGNIS_OMP_EXCEPTION_END()
-
+    start = std::chrono::steady_clock::now();
     for (auto group : thread_groups) {
         for (auto part : *group) { result->add(part); }
     }
@@ -371,13 +372,17 @@ void hdfsNotOrdering(const std::string &path, int64_t minPartitions,
     char *chdfsHost = new char[length2 + 1];
     strcpy(chdfsHost, hdfsHost.c_str());
     if (NewHdfsClient(chdfsHost) < 0) {
-        IGNIS_LOG(error) << "IO: hdfs client not connected";
+        throw ignis::executor::core::exception::IException("IO: hdfs client not connected");
         return;
     }
     IGNIS_LOG(info) << "IO: hdfs client connected";
     delete[] chdfsHost;
 
     auto size = Size(fpath);
+    if (size < 0) {
+        throw ignis::executor::core::exception::IException("IO: problem opening hdfs file");
+        return;
+    }
     IGNIS_LOG(info) << "IO: file has " << size << " Bytes";
     auto result = executor_data->getPartitionTools().newPartitionGroup<std::string>();
     decltype(result) thread_groups[io_cores];
@@ -388,7 +393,7 @@ void hdfsNotOrdering(const std::string &path, int64_t minPartitions,
     int file = Open(fpath, 'r');
     const std::vector<Block> blocks = GetBlocks(file);
     auto blocksToRead = assignedBlocks(blocks, executor_data);
-    //Obtencion de los bloques a leer
+    
     int first = blocks[0].BlockID;
     int blockSize = blocks[0].NumBytes;
     std::vector<Block> myBlocks;
@@ -500,7 +505,6 @@ void hdfsTextFile(const std::string &path, int64_t minPartitions,
     }
 
     std::string aux = "/" + path.substr(path.find('/') + 2);
-
     int length = aux.length();
     char *fpath = new char[length + 1];
     strcpy(fpath, aux.c_str());
@@ -510,13 +514,17 @@ void hdfsTextFile(const std::string &path, int64_t minPartitions,
     char *chdfsHost = new char[length2 + 1];
     strcpy(chdfsHost, hdfsHost.c_str());
     if (NewHdfsClient(chdfsHost) < 0) {
-        IGNIS_LOG(error) << "IO: hdfs client not connected";
+        throw ignis::executor::core::exception::IException("IO: hdfs client not connected");
         return;
     }
     IGNIS_LOG(info) << "IO: hdfs client connected";
     delete[] chdfsHost;
 
     auto size = Size(fpath);
+    if (size < 0) {
+        throw ignis::executor::core::exception::IException("IO: problem opening hdfs file");
+        return;
+    }
     IGNIS_LOG(info) << "IO: file has " << size << " Bytes";
     auto result = executor_data->getPartitionTools().newPartitionGroup<std::string>();
     decltype(result) thread_groups[io_cores];
@@ -524,12 +532,11 @@ void hdfsTextFile(const std::string &path, int64_t minPartitions,
     size_t elements = 0;
 
     std::string host = executor_data->getProperties().host();
-
+    
     IGNIS_OMP_EXCEPTION_INIT()
-#pragma omp parallel reduction(+ : total_bytes, elements) firstprivate(minPartitions) num_threads(io_cores)
+#pragma omp parallel reduction(+ : total_bytes, elements) firstprivate(minPartitions) private(start, end, diff) num_threads(io_cores)
     {
         IGNIS_OMP_TRY()
-        //std::ifstream file = openFileRead(path);
         auto file = Open(fpath, 'r');
         auto id = executor_data->getContext().threadId();
         auto globalThreadId = executor_data->getContext().executorId() * io_cores + id;
@@ -543,7 +550,7 @@ void hdfsTextFile(const std::string &path, int64_t minPartitions,
         std::vector<std::string> exs;
         std::string ldelim = "\n";
         int esize = 0;
-
+        
         if (globalThreadId > 0) {
             size_t padding = ex_chunk_init >= (ldelim.size()) ? ex_chunk_init - (ldelim.size()) : 0;
             Seek(file, padding, 0);
@@ -552,7 +559,7 @@ void hdfsTextFile(const std::string &path, int64_t minPartitions,
             ex_chunk_init = padding;
             if (globalThreadId == threads - 1) { ex_chunk_end = size; }
         }
-
+        
         if (ex_chunk / minPartitionSize < minPartitions) { minPartitionSize = ex_chunk / minPartitions; }
 
         thread_groups[id] = executor_data->getPartitionTools().newPartitionGroup<std::string>();
@@ -561,7 +568,7 @@ void hdfsTextFile(const std::string &path, int64_t minPartitions,
         thread_groups[id]->add(partition);
         size_t partitionInit = ex_chunk_init;
         size_t filepos = ex_chunk_init;
-
+        
         if (executor_data->getPartitionTools().isMemory(*partition)) {
             auto part_men = executor_data->getPartitionTools().toMemory(partition);
             while (filepos < ex_chunk_end) {
@@ -571,7 +578,6 @@ void hdfsTextFile(const std::string &path, int64_t minPartitions,
                     thread_groups[id]->add(part_men);
                     partitionInit = filepos;
                 }
-
                 str = ReadLine(file);
                 filepos += str.size();
                 elements++;
@@ -587,7 +593,6 @@ void hdfsTextFile(const std::string &path, int64_t minPartitions,
                     thread_groups[id]->add(partition);
                     partitionInit = filepos;
                 }
-                
                 str = ReadLine(file);
                 filepos += str.size();
                 elements++;
@@ -595,9 +600,8 @@ void hdfsTextFile(const std::string &path, int64_t minPartitions,
                 write_iterator->write(str);
             }
         }
-
         total_bytes += (size_t) filepos - ex_chunk_init;
-
+        
         Close(file, 'r');
         
         IGNIS_OMP_CATCH()
