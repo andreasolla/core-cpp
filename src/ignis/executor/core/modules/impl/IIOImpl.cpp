@@ -116,7 +116,7 @@ void IIOImpl::plainFile(const std::string &path, int64_t minPartitions, const st
     size_t elements = 0;
 
     IGNIS_OMP_EXCEPTION_INIT()
-#pragma omp parallel reduction(+ : total_bytes, elements) firstprivate(minPartitions) private(start, end, diff) num_threads(io_cores)
+#pragma omp parallel reduction(+ : total_bytes, elements) firstprivate(minPartitions) num_threads(io_cores)
     {
         IGNIS_OMP_TRY()
         std::ifstream file = openFileRead(path);
@@ -219,7 +219,7 @@ void IIOImpl::plainFile(const std::string &path, int64_t minPartitions, const st
         IGNIS_OMP_CATCH()
     }
     IGNIS_OMP_EXCEPTION_END()
-    start = std::chrono::steady_clock::now();
+    
     for (auto group : thread_groups) {
         for (auto part : *group) { result->add(part); }
     }
@@ -407,7 +407,7 @@ void hdfsNotOrdering(const std::string &path, int64_t minPartitions,
     Close(file, 'r');
     
     IGNIS_OMP_EXCEPTION_INIT()
-#pragma omp parallel reduction(+ : total_bytes, elements) firstprivate(minPartitions, myBlocks, blockSize) num_threads(io_cores)
+#pragma omp parallel reduction(+ : total_bytes, elements) firstprivate(myBlocks, blockSize) num_threads(io_cores)
     {
         IGNIS_OMP_TRY()
         auto file = Open(fpath, 'r');
@@ -419,6 +419,7 @@ void hdfsNotOrdering(const std::string &path, int64_t minPartitions,
         std::string ldelim = "\n";
         int esize = 0;
 
+#pragma omp for schedule(static)
         for (int i=0; i < myBlocks.size(); i++) {
             size_t ex_chunk_init = (myBlocks[i].BlockID - first) * blockSize;
             size_t ex_chunk_end = ex_chunk_init + myBlocks[i].NumBytes;
@@ -534,7 +535,7 @@ void hdfsTextFile(const std::string &path, int64_t minPartitions,
     std::string host = executor_data->getProperties().host();
     
     IGNIS_OMP_EXCEPTION_INIT()
-#pragma omp parallel reduction(+ : total_bytes, elements) firstprivate(minPartitions) private(start, end, diff) num_threads(io_cores)
+#pragma omp parallel reduction(+ : total_bytes, elements) firstprivate(minPartitions) num_threads(io_cores)
     {
         IGNIS_OMP_TRY()
         auto file = Open(fpath, 'r');
